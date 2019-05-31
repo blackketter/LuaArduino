@@ -1,0 +1,668 @@
+diff --git a/libraries/lua/lauxlib.c b/libraries/lua/lauxlib.c
+index bed3455..e211a96 100644
+--- a/libraries/lua/lauxlib.c
++++ b/libraries/lua/lauxlib.c
+@@ -558,6 +558,13 @@ typedef struct LoadF {
+   char buff[LUAL_BUFFERSIZE];
+ } LoadF;
+ 
++// void lua_compat_printf(char *fmt, ... );
++// void lua_compat_print(const char *s);
++int lua_compat_fopen(const char *filename);
++int lua_compat_ferror();
++void lua_compat_fclose();
++int lua_compat_feof();
++size_t lua_compat_fread(void* ptr, size_t size, size_t count);
+ 
+ static const char *getF (lua_State *L, void *ud, size_t *size) {
+   LoadF *lf = (LoadF *)ud;
+@@ -567,8 +574,8 @@ static const char *getF (lua_State *L, void *ud, size_t *size) {
+     *size = 1;
+     return "\n";
+   }
+-  if (feof(lf->f)) return NULL;
+-  *size = fread(lf->buff, 1, sizeof(lf->buff), lf->f);
++  if (lua_compat_feof()) return NULL;
++  *size = lua_compat_fread(lf->buff, 1, sizeof(lf->buff));
+   return (*size > 0) ? lf->buff : NULL;
+ }
+ 
+@@ -581,46 +588,53 @@ static int errfile (lua_State *L, const char *what, int fnameindex) {
+   return LUA_ERRFILE;
+ }
+ 
+-
+-// LUALIB_API int luaL_loadfile (lua_State *L, const char *filename) {
+-//   LoadF lf;
+-//   int status, readstatus;
+-//   int c;
+-//   int fnameindex = lua_gettop(L) + 1;  /* index of filename on the stack */
+-//   lf.extraline = 0;
+-//   if (filename == NULL) {
+-//     lua_pushliteral(L, "=stdin");
+-//     lf.f = stdin;
+-//   }
+-//   else {
+-//     lua_pushfstring(L, "@%s", filename);
+-//     lf.f = fopen(filename, "r");
+-//     if (lf.f == NULL) return errfile(L, "open", fnameindex);
+-//   }
+-//   c = getc(lf.f);
+-//   if (c == '#') {  /* Unix exec. file? */
+-//     lf.extraline = 1;
+-//     while ((c = getc(lf.f)) != EOF && c != '\n') ;  /* skip first line */
+-//     if (c == '\n') c = getc(lf.f);
+-//   }
+-//   if (c == LUA_SIGNATURE[0] && filename) {  /* binary file? */
+-//     lf.f = freopen(filename, "rb", lf.f);  /* reopen in binary mode */
+-//     if (lf.f == NULL) return errfile(L, "reopen", fnameindex);
+-//     /* skip eventual `#!...' */
+-//    while ((c = getc(lf.f)) != EOF && c != LUA_SIGNATURE[0]) ;
+-//     lf.extraline = 0;
+-//   }
+-//   ungetc(c, lf.f);
+-//   status = lua_load(L, getF, &lf, lua_tostring(L, -1));
+-//   readstatus = ferror(lf.f);
+-//   if (filename) fclose(lf.f);  /* close file (even in case of errors) */
+-//   if (readstatus) {
+-//     lua_settop(L, fnameindex);  /* ignore results from `lua_load' */
+-//     return errfile(L, "read", fnameindex);
+-//   }
+-//   lua_remove(L, fnameindex);
+-//   return status;
+-// }
++LUALIB_API int luaL_loadfile (lua_State *L, const char *filename) {
++  LoadF lf;
++  int status, readstatus;
++  // int c;
++  int fnameindex = lua_gettop(L) + 1;  /* index of filename on the stack */
++  lf.extraline = 0;
++
++  lua_pushfstring(L, "@%s", filename);
++  if(!lua_compat_fopen(filename))
++    return errfile(L, "open", fnameindex);
++
++  // skip file checks
++
++  // if (filename == NULL) {
++  //   lua_pushliteral(L, "=stdin");
++  //   lf.f = stdin;
++  // }
++  // else {
++  //   lua_pushfstring(L, "@%s", filename);
++  //   lf.f = fopen(filename, "r");
++  //   if (lf.f == NULL) return errfile(L, "open", fnameindex);
++  // }
++  // c = getc(lf.f);
++  // if (c == '#') {  /* Unix exec. file? */
++  //   lf.extraline = 1;
++  //   while ((c = getc(lf.f)) != EOF && c != '\n') ;  /* skip first line */
++  //   if (c == '\n') c = getc(lf.f);
++  // }
++  // if (c == LUA_SIGNATURE[0] && filename) {  /* binary file? */
++  //   lf.f = freopen(filename, "rb", lf.f);  /* reopen in binary mode */
++  //   if (lf.f == NULL) return errfile(L, "reopen", fnameindex);
++  //   /* skip eventual `#!...' */
++  //  while ((c = getc(lf.f)) != EOF && c != LUA_SIGNATURE[0]) ;
++  //   lf.extraline = 0;
++  // }
++  // ungetc(c, lf.f);
++
++  status = lua_load(L, getF, &lf, lua_tostring(L, -1));
++  readstatus = lua_compat_ferror(); // readstatus = ferror(lf.f);
++  if (filename) lua_compat_fclose();  /* close file (even in case of errors) */
++  if (readstatus) {
++    lua_settop(L, fnameindex);  /* ignore results from `lua_load' */
++    return errfile(L, "read", fnameindex);
++  }
++  lua_remove(L, fnameindex);
++  return status;
++}
+ 
+ 
+ typedef struct LoadS {
+diff --git a/libraries/lua/lauxlib.h b/libraries/lua/lauxlib.h
+index 3f2fa9c..0435f13 100644
+--- a/libraries/lua/lauxlib.h
++++ b/libraries/lua/lauxlib.h
+@@ -4,11 +4,13 @@
+ ** See Copyright Notice in lua.h
+ */
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ #ifndef lauxlib_h
+ #define lauxlib_h
+ 
+-
+ #include <stddef.h>
+ #include <stdio.h>
+ 
+@@ -77,7 +79,7 @@ LUALIB_API int (luaL_checkoption) (lua_State *L, int narg, const char *def,
+ LUALIB_API int (luaL_ref) (lua_State *L, int t);
+ LUALIB_API void (luaL_unref) (lua_State *L, int t, int ref);
+ 
+-//LUALIB_API int (luaL_loadfile) (lua_State *L, const char *filename);
++LUALIB_API int (luaL_loadfile) (lua_State *L, const char *filename);
+ LUALIB_API int (luaL_loadbuffer) (lua_State *L, const char *buff, size_t sz,
+                                   const char *name);
+ LUALIB_API int (luaL_loadstring) (lua_State *L, const char *s);
+@@ -111,8 +113,8 @@ LUALIB_API const char *(luaL_findtable) (lua_State *L, int idx,
+ 
+ #define luaL_typename(L,i)	lua_typename(L, lua_type(L,(i)))
+ 
+-// #define luaL_dofile(L, fn)
+-// 	(luaL_loadfile(L, fn) || lua_pcall(L, 0, LUA_MULTRET, 0))
++#define luaL_dofile(L, fn) \
++	(luaL_loadfile(L, fn) || lua_pcall(L, 0, LUA_MULTRET, 0))
+ 
+ #define luaL_dostring(L, s) \
+ 	(luaL_loadstring(L, s) || lua_pcall(L, 0, LUA_MULTRET, 0))
+@@ -174,4 +176,8 @@ LUALIB_API void (luaL_pushresult) (luaL_Buffer *B);
+ 
+ #endif
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ 
+diff --git a/libraries/lua/lbaselib.c b/libraries/lua/lbaselib.c
+index ea12125..c856d60 100644
+--- a/libraries/lua/lbaselib.c
++++ b/libraries/lua/lbaselib.c
+@@ -28,8 +28,8 @@
+ #endif
+ 
+ 
+-void my_serial_printf(char *fmt, ... );
+-void my_serial_print(const char *s);
++void lua_compat_printf(char *fmt, ... );
++void lua_compat_print(const char *s);
+ 
+ /*
+ ** If your system does not support `stdout', you can just remove this function.
+@@ -50,11 +50,11 @@ static int luaB_print (lua_State *L) {
+     if (s == NULL)
+       return luaL_error(L, LUA_QL("tostring") " must return a string to "
+                            LUA_QL("print"));
+-    if (i>1) my_serial_print("\t");
+-    my_serial_print(s);
++    if (i>1) lua_compat_print("\t");
++    lua_compat_print(s);
+     lua_pop(L, 1);  /* pop result */
+   }
+-  my_serial_print("\n");
++  lua_compat_print("\n");
+   return 0;
+ }
+ 
+diff --git a/libraries/lua/lmathlib.c b/libraries/lua/lmathlib.c
+index 302bd80..bbbfc20 100644
+--- a/libraries/lua/lmathlib.c
++++ b/libraries/lua/lmathlib.c
+@@ -24,85 +24,85 @@
+ 
+ 
+ static int math_abs (lua_State *L) {
+-  lua_pushnumber(L, fabs(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, fabsf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_sin (lua_State *L) {
+-  lua_pushnumber(L, sin(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, sinf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_sinh (lua_State *L) {
+-  lua_pushnumber(L, sinh(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, sinhf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_cos (lua_State *L) {
+-  lua_pushnumber(L, cos(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, cosf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_cosh (lua_State *L) {
+-  lua_pushnumber(L, cosh(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, coshf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_tan (lua_State *L) {
+-  lua_pushnumber(L, tan(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, tanf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_tanh (lua_State *L) {
+-  lua_pushnumber(L, tanh(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, tanhf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_asin (lua_State *L) {
+-  lua_pushnumber(L, asin(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, asinf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_acos (lua_State *L) {
+-  lua_pushnumber(L, acos(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, acosf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_atan (lua_State *L) {
+-  lua_pushnumber(L, atan(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, atanf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_atan2 (lua_State *L) {
+-  lua_pushnumber(L, atan2(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
++  lua_pushnumber(L, atan2f(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
+   return 1;
+ }
+ 
+ static int math_ceil (lua_State *L) {
+-  lua_pushnumber(L, ceil(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, ceilf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_floor (lua_State *L) {
+-  lua_pushnumber(L, floor(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, floorf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_fmod (lua_State *L) {
+-  lua_pushnumber(L, fmod(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
++  lua_pushnumber(L, fmodf(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
+   return 1;
+ }
+ 
+ static int math_modf (lua_State *L) {
+-  double ip;
+-  double fp = modf(luaL_checknumber(L, 1), &ip);
++  LUA_NUMBER ip;
++  LUA_NUMBER fp = modff(luaL_checknumber(L, 1), &ip);
+   lua_pushnumber(L, ip);
+   lua_pushnumber(L, fp);
+   return 2;
+ }
+ 
+ static int math_sqrt (lua_State *L) {
+-  lua_pushnumber(L, sqrt(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, sqrtf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+@@ -112,17 +112,17 @@ static int math_pow (lua_State *L) {
+ }
+ 
+ static int math_log (lua_State *L) {
+-  lua_pushnumber(L, log(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, logf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_log10 (lua_State *L) {
+-  lua_pushnumber(L, log10(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, log10f(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+ static int math_exp (lua_State *L) {
+-  lua_pushnumber(L, exp(luaL_checknumber(L, 1)));
++  lua_pushnumber(L, expf(luaL_checknumber(L, 1)));
+   return 1;
+ }
+ 
+@@ -138,13 +138,13 @@ static int math_rad (lua_State *L) {
+ 
+ static int math_frexp (lua_State *L) {
+   int e;
+-  lua_pushnumber(L, frexp(luaL_checknumber(L, 1), &e));
++  lua_pushnumber(L, frexpf(luaL_checknumber(L, 1), &e));
+   lua_pushinteger(L, e);
+   return 2;
+ }
+ 
+ static int math_ldexp (lua_State *L) {
+-  lua_pushnumber(L, ldexp(luaL_checknumber(L, 1), luaL_checkint(L, 2)));
++  lua_pushnumber(L, ldexpf(luaL_checknumber(L, 1), luaL_checkint(L, 2)));
+   return 1;
+ }
+ 
+diff --git a/libraries/lua/lua.h b/libraries/lua/lua.h
+index c8043fd..ea10d96 100644
+--- a/libraries/lua/lua.h
++++ b/libraries/lua/lua.h
+@@ -5,6 +5,9 @@
+ ** See Copyright Notice at the end of this file
+ */
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ #ifndef lua_h
+ #define lua_h
+@@ -250,7 +253,7 @@ LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud);
+ 
+ 
+ 
+-/* 
++/*
+ ** ===============================================================
+ ** some useful macros
+ ** ===============================================================
+@@ -390,5 +393,8 @@ struct lua_Debug {
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+ 
++#endif
+ 
++#ifdef __cplusplus
++}
+ #endif
+diff --git a/libraries/lua/luaconf.h b/libraries/lua/luaconf.h
+index a741e60..54a121b 100644
+--- a/libraries/lua/luaconf.h
++++ b/libraries/lua/luaconf.h
+@@ -501,14 +501,14 @@
+ ** ===================================================================
+ */
+ 
+-#define LUA_NUMBER_DOUBLE
+-#define LUA_NUMBER	double
++/* #define LUA_NUMBER_DOUBLE */
++#define LUA_NUMBER	float
+ 
+ /*
+ @@ LUAI_UACNUMBER is the result of an 'usual argument conversion'
+ @* over a number.
+ */
+-#define LUAI_UACNUMBER	double
++#define LUAI_UACNUMBER	LUA_NUMBER
+ 
+ 
+ /*
+diff --git a/libraries/lua/lualib.h b/libraries/lua/lualib.h
+index 04a0914..008df26 100644
+--- a/libraries/lua/lualib.h
++++ b/libraries/lua/lualib.h
+@@ -4,6 +4,9 @@
+ ** See Copyright Notice in lua.h
+ */
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ #ifndef lualib_h
+ #define lualib_h
+@@ -24,8 +27,8 @@ LUALIB_API int (luaopen_table) (lua_State *L);
+ //#define LUA_IOLIBNAME	"io"
+ //LUALIB_API int (luaopen_io) (lua_State *L);
+ 
+-#define LUA_OSLIBNAME	"os"
+-LUALIB_API int (luaopen_os) (lua_State *L);
++//#define LUA_OSLIBNAME	"os"
++//LUALIB_API int (luaopen_os) (lua_State *L);
+ 
+ #define LUA_STRLIBNAME	"string"
+ LUALIB_API int (luaopen_string) (lua_State *L);
+@@ -49,5 +52,8 @@ LUALIB_API void (luaL_openlibs) (lua_State *L);
+ #define lua_assert(x)	((void)0)
+ #endif
+ 
++#endif
+ 
++#ifdef __cplusplus
++}
+ #endif
+diff --git a/libraries/lua/print.c b/libraries/lua/print.c
+deleted file mode 100644
+index 4fc6f8b..0000000
+--- a/libraries/lua/print.c
++++ /dev/null
+@@ -1,229 +0,0 @@
+-/*
+-** $Id: print.c,v 1.55a 2006/05/31 13:30:05 lhf Exp $
+-** print bytecodes
+-** See Copyright Notice in lua.h
+-*/
+-
+-#include <ctype.h>
+-#include <stdio.h>
+-
+-void my_serial_printf(char *fmt, ... );
+-
+-#define luac_c
+-#define LUA_CORE
+-
+-#include "ldebug.h"
+-#include "lobject.h"
+-#include "lopcodes.h"
+-#include "lundump.h"
+-
+-#define PrintFunction	luaU_print
+-
+-#define Sizeof(x)	((int)sizeof(x))
+-#define VOID(p)		((const void*)(p))
+-
+-static void PrintString(const TString* ts)
+-{
+- const char* s=getstr(ts);
+- size_t i,n=ts->tsv.len;
+- putchar('"');
+- for (i=0; i<n; i++)
+- {
+-  int c=s[i];
+-  switch (c)
+-  {
+-   case '"': my_serial_printf("\\\""); break;
+-   case '\\': my_serial_printf("\\\\"); break;
+-   case '\a': my_serial_printf("\\a"); break;
+-   case '\b': my_serial_printf("\\b"); break;
+-   case '\f': my_serial_printf("\\f"); break;
+-   case '\n': my_serial_printf("\\n"); break;
+-   case '\r': my_serial_printf("\\r"); break;
+-   case '\t': my_serial_printf("\\t"); break;
+-   case '\v': my_serial_printf("\\v"); break;
+-   default:	if (isprint((unsigned char)c))
+-   			putchar(c);
+-		else
+-			my_serial_printf("\\%03u",(unsigned char)c);
+-  }
+- }
+- putchar('"');
+-}
+-
+-static void PrintConstant(const Proto* f, int i)
+-{
+- const TValue* o=&f->k[i];
+- switch (ttype(o))
+- {
+-  case LUA_TNIL:
+-	my_serial_printf("nil");
+-	break;
+-  case LUA_TBOOLEAN:
+-	my_serial_printf(bvalue(o) ? "true" : "false");
+-	break;
+-  case LUA_TNUMBER:
+-	my_serial_printf(LUA_NUMBER_FMT,nvalue(o));
+-	break;
+-  case LUA_TSTRING:
+-	PrintString(rawtsvalue(o));
+-	break;
+-  default:				/* cannot happen */
+-	my_serial_printf("? type=%d",ttype(o));
+-	break;
+- }
+-}
+-
+-static void PrintCode(const Proto* f)
+-{
+- const Instruction* code=f->code;
+- int pc,n=f->sizecode;
+- for (pc=0; pc<n; pc++)
+- {
+-  Instruction i=code[pc];
+-  OpCode o=GET_OPCODE(i);
+-  int a=GETARG_A(i);
+-  int b=GETARG_B(i);
+-  int c=GETARG_C(i);
+-  int bx=GETARG_Bx(i);
+-  int sbx=GETARG_sBx(i);
+-  int line=getline(f,pc);
+-  my_serial_printf("\t%d\t",pc+1);
+-  if (line>0) my_serial_printf("[%d]\t",line); else my_serial_printf("[-]\t");
+-  my_serial_printf("%-9s\t",luaP_opnames[o]);
+-  switch (getOpMode(o))
+-  {
+-   case iABC:
+-    my_serial_printf("%d",a);
+-    if (getBMode(o)!=OpArgN) my_serial_printf(" %d",ISK(b) ? (-1-INDEXK(b)) : b);
+-    if (getCMode(o)!=OpArgN) my_serial_printf(" %d",ISK(c) ? (-1-INDEXK(c)) : c);
+-    break;
+-   case iABx:
+-    if (getBMode(o)==OpArgK) my_serial_printf("%d %d",a,-1-bx); else my_serial_printf("%d %d",a,bx);
+-    break;
+-   case iAsBx:
+-    if (o==OP_JMP) my_serial_printf("%d",sbx); else my_serial_printf("%d %d",a,sbx);
+-    break;
+-  }
+-  switch (o)
+-  {
+-   case OP_LOADK:
+-    my_serial_printf("\t; "); PrintConstant(f,bx);
+-    break;
+-   case OP_GETUPVAL:
+-   case OP_SETUPVAL:
+-    my_serial_printf("\t; %s", (f->sizeupvalues>0) ? getstr(f->upvalues[b]) : "-");
+-    break;
+-   case OP_GETGLOBAL:
+-   case OP_SETGLOBAL:
+-    my_serial_printf("\t; %s",svalue(&f->k[bx]));
+-    break;
+-   case OP_GETTABLE:
+-   case OP_SELF:
+-    if (ISK(c)) { my_serial_printf("\t; "); PrintConstant(f,INDEXK(c)); }
+-    break;
+-   case OP_SETTABLE:
+-   case OP_ADD:
+-   case OP_SUB:
+-   case OP_MUL:
+-   case OP_DIV:
+-   case OP_POW:
+-   case OP_EQ:
+-   case OP_LT:
+-   case OP_LE:
+-    if (ISK(b) || ISK(c))
+-    {
+-     my_serial_printf("\t; ");
+-     if (ISK(b)) PrintConstant(f,INDEXK(b)); else my_serial_printf("-");
+-     my_serial_printf(" ");
+-     if (ISK(c)) PrintConstant(f,INDEXK(c)); else my_serial_printf("-");
+-    }
+-    break;
+-   case OP_JMP:
+-   case OP_FORLOOP:
+-   case OP_FORPREP:
+-    my_serial_printf("\t; to %d",sbx+pc+2);
+-    break;
+-   case OP_CLOSURE:
+-    my_serial_printf("\t; %p",VOID(f->p[bx]));
+-    break;
+-   case OP_SETLIST:
+-    if (c==0) my_serial_printf("\t; %d",(int)code[++pc]);
+-    else my_serial_printf("\t; %d",c);
+-    break;
+-   default:
+-    break;
+-  }
+-  my_serial_printf("\n");
+- }
+-}
+-
+-#define SS(x)	(x==1)?"":"s"
+-#define S(x)	x,SS(x)
+-
+-static void PrintHeader(const Proto* f)
+-{
+- const char* s=getstr(f->source);
+- if (*s=='@' || *s=='=')
+-  s++;
+- else if (*s==LUA_SIGNATURE[0])
+-  s="(bstring)";
+- else
+-  s="(string)";
+- my_serial_printf("\n%s <%s:%d,%d> (%d instruction%s, %d bytes at %p)\n",
+- 	(f->linedefined==0)?"main":"function",s,
+-	f->linedefined,f->lastlinedefined,
+-	S(f->sizecode),f->sizecode*Sizeof(Instruction),VOID(f));
+- my_serial_printf("%d%s param%s, %d slot%s, %d upvalue%s, ",
+-	f->numparams,f->is_vararg?"+":"",SS(f->numparams),
+-	S(f->maxstacksize),S(f->nups));
+- my_serial_printf("%d local%s, %d constant%s, %d function%s\n",
+-	S(f->sizelocvars),S(f->sizek),S(f->sizep));
+-}
+-
+-static void PrintConstants(const Proto* f)
+-{
+- int i,n=f->sizek;
+- my_serial_printf("constants (%d) for %p:\n",n,VOID(f));
+- for (i=0; i<n; i++)
+- {
+-  my_serial_printf("\t%d\t",i+1);
+-  PrintConstant(f,i);
+-  my_serial_printf("\n");
+- }
+-}
+-
+-static void PrintLocals(const Proto* f)
+-{
+- int i,n=f->sizelocvars;
+- my_serial_printf("locals (%d) for %p:\n",n,VOID(f));
+- for (i=0; i<n; i++)
+- {
+-  my_serial_printf("\t%d\t%s\t%d\t%d\n",
+-  i,getstr(f->locvars[i].varname),f->locvars[i].startpc+1,f->locvars[i].endpc+1);
+- }
+-}
+-
+-static void PrintUpvalues(const Proto* f)
+-{
+- int i,n=f->sizeupvalues;
+- my_serial_printf("upvalues (%d) for %p:\n",n,VOID(f));
+- if (f->upvalues==NULL) return;
+- for (i=0; i<n; i++)
+- {
+-  my_serial_printf("\t%d\t%s\n",i,getstr(f->upvalues[i]));
+- }
+-}
+-
+-void PrintFunction(const Proto* f, int full)
+-{
+- int i,n=f->sizep;
+- PrintHeader(f);
+- PrintCode(f);
+- if (full)
+- {
+-  PrintConstants(f);
+-  PrintLocals(f);
+-  PrintUpvalues(f);
+- }
+- for (i=0; i<n; i++) PrintFunction(f->p[i],full);
+-}

@@ -1,0 +1,1157 @@
+diff -urN lua-5.1.4/src/lapi.c lua-5.1.4.patched/src/lapi.c
+--- lua-5.1.4/src/lapi.c	2008-07-04 21:41:18.000000000 +0300
++++ lua-5.1.4.patched/src/lapi.c	2008-11-17 23:17:10.000000000 +0200
+@@ -61,12 +61,13 @@
+     case LUA_REGISTRYINDEX: return registry(L);
+     case LUA_ENVIRONINDEX: {
+       Closure *func = curr_func(L);
+-      sethvalue(L, &L->env, func->c.env);
++      sethvalue(L, &L->env, func ? func->c.env : hvalue(gt(L)));
+       return &L->env;
+     }
+     case LUA_GLOBALSINDEX: return gt(L);
+     default: {
+       Closure *func = curr_func(L);
++      if (!func) return cast(TValue *, luaO_nilobject);
+       idx = LUA_GLOBALSINDEX - idx;
+       return (idx <= func->c.nupvalues)
+                 ? &func->c.upvalue[idx-1]
+@@ -81,7 +82,7 @@
+     return hvalue(gt(L));  /* use global table as environment */
+   else {
+     Closure *func = curr_func(L);
+-    return func->c.env;
++    return func ? func->c.env : hvalue(gt(L));
+   }
+ }
+
+@@ -211,13 +212,17 @@
+   api_checkvalidindex(L, o);
+   if (idx == LUA_ENVIRONINDEX) {
+     Closure *func = curr_func(L);
+-    api_check(L, ttistable(L->top - 1));
+-    func->c.env = hvalue(L->top - 1);
+-    luaC_barrier(L, func, L->top - 1);
++    if (!func)
++      luaG_runerror(L, "attempt to set environment on lightfunction");
++    else {
++      api_check(L, ttistable(L->top - 1));
++      func->c.env = hvalue(L->top - 1);
++      luaC_barrier(L, func, L->top - 1);
++    }
+   }
+   else {
+     setobj(L, o, L->top - 1);
+-    if (idx < LUA_GLOBALSINDEX)  /* function upvalue? */
++    if (curr_func(L) && idx < LUA_GLOBALSINDEX)  /* function upvalue? */
+       luaC_barrier(L, curr_func(L), L->top - 1);
+   }
+   L->top--;
+@@ -407,6 +412,9 @@
+     case LUA_TUSERDATA:
+     case LUA_TLIGHTUSERDATA:
+       return lua_touserdata(L, idx);
++    case LUA_TROTABLE:
++    case LUA_TLIGHTFUNCTION:
++      return pvalue(o);
+     default: return NULL;
+   }
+ }
+@@ -515,6 +523,20 @@
+   lua_unlock(L);
+ }
+
++LUA_API void lua_pushrotable (lua_State *L, void *p) {
++  lua_lock(L);
++  setrvalue(L->top, p);
++  api_incr_top(L);
++  lua_unlock(L);
++}
++
++LUA_API void lua_pushlightfunction(lua_State *L, void *p) {
++  lua_lock(L);
++  setfvalue(L->top, p);
++  api_incr_top(L);
++  lua_unlock(L);
++}
++
+
+ LUA_API int lua_pushthread (lua_State *L) {
+   lua_lock(L);
+diff -urN lua-5.1.4/src/lauxlib.c lua-5.1.4.patched/src/lauxlib.c
+--- lua-5.1.4/src/lauxlib.c	2008-01-21 15:20:51.000000000 +0200
++++ lua-5.1.4.patched/src/lauxlib.c	2008-11-17 15:31:13.000000000 +0200
+@@ -22,6 +22,8 @@
+
+ #include "lua.h"
+
++#include "lrotable.h"
++
+ #include "lauxlib.h"
+
+
+@@ -32,6 +34,9 @@
+ #define abs_index(L, i)		((i) > 0 || (i) <= LUA_REGISTRYINDEX ? (i) : \
+ 					lua_gettop(L) + (i) + 1)
+
++// Parameters for luaI_openlib
++#define LUA_USECCLOSURES          0
++#define LUA_USELIGHTFUNCTIONS     1
+
+ /*
+ ** {======================================================
+@@ -148,6 +153,14 @@
+     tag_error(L, narg, t);
+ }
+
++LUALIB_API void luaL_checkanyfunction (lua_State *L, int narg) {
++  if (lua_type(L, narg) != LUA_TFUNCTION && lua_type(L, narg) != LUA_TLIGHTFUNCTION) {
++    const char *msg = lua_pushfstring(L, "function or lightfunction expected, got %s",
++                                      luaL_typename(L, narg));
++    luaL_argerror(L, narg, msg);
++  }
++}
++
+
+ LUALIB_API void luaL_checkany (lua_State *L, int narg) {
+   if (lua_type(L, narg) == LUA_TNONE)
+@@ -228,9 +241,17 @@
+
+ LUALIB_API void (luaL_register) (lua_State *L, const char *libname,
+                                 const luaL_Reg *l) {
+-  luaI_openlib(L, libname, l, 0);
++  luaI_openlib(L, libname, l, 0, LUA_USECCLOSURES);
+ }
+
++LUALIB_API void (luaL_register_light) (lua_State *L, const char *libname,
++                                const luaL_Reg *l) {
++#if LUA_OPTIMIZE_MEMORY > 0
++  luaI_openlib(L, libname, l, 0, LUA_USELIGHTFUNCTIONS);
++#else
++  luaI_openlib(L, libname, l, 0, LUA_USECCLOSURES);
++#endif
++}
+
+ static int libsize (const luaL_Reg *l) {
+   int size = 0;
+@@ -240,7 +261,7 @@
+
+
+ LUALIB_API void luaI_openlib (lua_State *L, const char *libname,
+-                              const luaL_Reg *l, int nup) {
++                              const luaL_Reg *l, int nup, int ftype) {
+   if (libname) {
+     int size = libsize(l);
+     /* check whether lib already exists */
+@@ -261,7 +282,10 @@
+     int i;
+     for (i=0; i<nup; i++)  /* copy upvalues to the top */
+       lua_pushvalue(L, -nup);
+-    lua_pushcclosure(L, l->func, nup);
++    if (ftype == LUA_USELIGHTFUNCTIONS)
++      lua_pushlightfunction(L, l->func);
++    else
++      lua_pushcclosure(L, l->func, nup);
+     lua_setfield(L, -(nup+2), l->name);
+   }
+   lua_pop(L, nup);  /* remove upvalues */
+@@ -364,6 +388,15 @@
+     lua_pushlstring(L, fname, e - fname);
+     lua_rawget(L, -2);
+     if (lua_isnil(L, -1)) {  /* no such field? */
++      /* Check for rotables */
++      if (idx == LUA_GLOBALSINDEX) {
++        lu_byte keytype;
++        luaR_findglobal(fname, &keytype);
++        if (keytype == LUA_TROTABLE) {
++          lua_pop(L, 2);
++          return fname;
++        }
++      }
+       lua_pop(L, 1);  /* remove this nil */
+       lua_createtable(L, 0, (*e == '.' ? 1 : szhint)); /* new table for field */
+       lua_pushlstring(L, fname, e - fname);
+diff -urN lua-5.1.4/src/lauxlib.h lua-5.1.4.patched/src/lauxlib.h
+--- lua-5.1.4/src/lauxlib.h	2007-12-27 15:02:25.000000000 +0200
++++ lua-5.1.4.patched/src/lauxlib.h	2008-11-16 19:34:12.000000000 +0200
+@@ -40,9 +40,11 @@
+
+
+ LUALIB_API void (luaI_openlib) (lua_State *L, const char *libname,
+-                                const luaL_Reg *l, int nup);
++                                const luaL_Reg *l, int nup, int ftype);
+ LUALIB_API void (luaL_register) (lua_State *L, const char *libname,
+                                 const luaL_Reg *l);
++LUALIB_API void (luaL_register_light) (lua_State *L, const char *libname,
++                                const luaL_Reg *l);
+ LUALIB_API int (luaL_getmetafield) (lua_State *L, int obj, const char *e);
+ LUALIB_API int (luaL_callmeta) (lua_State *L, int obj, const char *e);
+ LUALIB_API int (luaL_typerror) (lua_State *L, int narg, const char *tname);
+@@ -61,6 +63,7 @@
+ LUALIB_API void (luaL_checkstack) (lua_State *L, int sz, const char *msg);
+ LUALIB_API void (luaL_checktype) (lua_State *L, int narg, int t);
+ LUALIB_API void (luaL_checkany) (lua_State *L, int narg);
++LUALIB_API void (luaL_checkanyfunction) (lua_State *L, int narg);
+
+ LUALIB_API int   (luaL_newmetatable) (lua_State *L, const char *tname);
+ LUALIB_API void *(luaL_checkudata) (lua_State *L, int ud, const char *tname);
+diff -urN lua-5.1.4/src/lbaselib.c lua-5.1.4.patched/src/lbaselib.c
+--- lua-5.1.4/src/lbaselib.c	2008-02-14 18:46:22.000000000 +0200
++++ lua-5.1.4.patched/src/lbaselib.c	2008-11-17 15:32:44.000000000 +0200
+@@ -18,6 +18,7 @@
+
+ #include "lauxlib.h"
+ #include "lualib.h"
++#include "lrotable.h"
+
+
+
+@@ -444,34 +445,54 @@
+ }
+
+
++#define LUA_BASE_FUNCLIST\
++  {"assert", luaB_assert},\
++  {"collectgarbage", luaB_collectgarbage},\
++  {"dofile", luaB_dofile},\
++  {"error", luaB_error},\
++  {"gcinfo", luaB_gcinfo},\
++  {"getfenv", luaB_getfenv},\
++  {"getmetatable", luaB_getmetatable},\
++  {"loadfile", luaB_loadfile},\
++  {"load", luaB_load},\
++  {"loadstring", luaB_loadstring},\
++  {"next", luaB_next},\
++  {"pcall", luaB_pcall},\
++  {"print", luaB_print},\
++  {"rawequal", luaB_rawequal},\
++  {"rawget", luaB_rawget},\
++  {"rawset", luaB_rawset},\
++  {"select", luaB_select},\
++  {"setfenv", luaB_setfenv},\
++  {"setmetatable", luaB_setmetatable},\
++  {"tonumber", luaB_tonumber},\
++  {"tostring", luaB_tostring},\
++  {"type", luaB_type},\
++  {"unpack", luaB_unpack},\
++  {"xpcall", luaB_xpcall}
++
++#if LUA_OPTIMIZE_MEMORY != 2
+ static const luaL_Reg base_funcs[] = {
+-  {"assert", luaB_assert},
+-  {"collectgarbage", luaB_collectgarbage},
+-  {"dofile", luaB_dofile},
+-  {"error", luaB_error},
+-  {"gcinfo", luaB_gcinfo},
+-  {"getfenv", luaB_getfenv},
+-  {"getmetatable", luaB_getmetatable},
+-  {"loadfile", luaB_loadfile},
+-  {"load", luaB_load},
+-  {"loadstring", luaB_loadstring},
+-  {"next", luaB_next},
+-  {"pcall", luaB_pcall},
+-  {"print", luaB_print},
+-  {"rawequal", luaB_rawequal},
+-  {"rawget", luaB_rawget},
+-  {"rawset", luaB_rawset},
+-  {"select", luaB_select},
+-  {"setfenv", luaB_setfenv},
+-  {"setmetatable", luaB_setmetatable},
+-  {"tonumber", luaB_tonumber},
+-  {"tostring", luaB_tostring},
+-  {"type", luaB_type},
+-  {"unpack", luaB_unpack},
+-  {"xpcall", luaB_xpcall},
++  LUA_BASE_FUNCLIST,
++  {NULL, NULL}
++};
++#else
++static const luaL_Reg base_realfuncs[] = {
++  LUA_BASE_FUNCLIST,
+   {NULL, NULL}
+ };
+
++static int luaB_index(lua_State *L)
++{
++  return luaR_findfunction(L, base_realfuncs);
++}
++
++static const luaL_Reg base_funcs[] = {
++  {"__index", luaB_index},
++  {NULL, NULL}
++};
++#endif
++
+
+ /*
+ ** {======================================================
+@@ -602,7 +623,7 @@
+ }
+
+
+-static const luaL_Reg co_funcs[] = {
++const luaL_Reg co_funcs[] = {
+   {"create", luaB_cocreate},
+   {"resume", luaB_coresume},
+   {"running", luaB_corunning},
+@@ -628,7 +649,11 @@
+   lua_pushvalue(L, LUA_GLOBALSINDEX);
+   lua_setglobal(L, "_G");
+   /* open lib into global table */
+-  luaL_register(L, "_G", base_funcs);
++  luaL_register_light(L, "_G", base_funcs);
++#if LUA_OPTIMIZE_MEMORY == 2
++  lua_pushvalue(L, -1);
++  lua_setmetatable(L, -2);
++#endif
+   lua_pushliteral(L, LUA_VERSION);
+   lua_setglobal(L, "_VERSION");  /* set global _VERSION */
+   /* `ipairs' and `pairs' need auxliliary functions as upvalues */
+@@ -647,7 +672,11 @@
+
+ LUALIB_API int luaopen_base (lua_State *L) {
+   base_open(L);
++#if LUA_OPTIMIZE_MEMORY == 0
+   luaL_register(L, LUA_COLIBNAME, co_funcs);
+   return 2;
++#else
++  return 1;
++#endif
+ }
+
+diff -urN lua-5.1.4/src/ldblib.c lua-5.1.4.patched/src/ldblib.c
+--- lua-5.1.4/src/ldblib.c	2008-01-21 15:11:21.000000000 +0200
++++ lua-5.1.4.patched/src/ldblib.c	2008-11-17 15:34:26.000000000 +0200
+@@ -106,7 +106,7 @@
+       return 1;
+     }
+   }
+-  else if (lua_isfunction(L, arg+1)) {
++  else if (lua_isfunction(L, arg+1) || lua_islightfunction(L, arg+1)) {
+     lua_pushfstring(L, ">%s", options);
+     options = lua_tostring(L, -1);
+     lua_pushvalue(L, arg+1);
+@@ -264,7 +264,7 @@
+   }
+   else {
+     const char *smask = luaL_checkstring(L, arg+2);
+-    luaL_checktype(L, arg+1, LUA_TFUNCTION);
++    luaL_checkanyfunction(L, arg+1);
+     count = luaL_optint(L, arg+3, 0);
+     func = hookf; mask = makemask(smask, count);
+   }
+@@ -371,7 +371,7 @@
+ }
+
+
+-static const luaL_Reg dblib[] = {
++const luaL_Reg dblib[] = {
+   {"debug", db_debug},
+   {"getfenv", db_getfenv},
+   {"gethook", db_gethook},
+@@ -391,7 +391,11 @@
+
+
+ LUALIB_API int luaopen_debug (lua_State *L) {
++#if LUA_OPTIMIZE_MEMORY > 0
++  return 0;
++#else
+   luaL_register(L, LUA_DBLIBNAME, dblib);
+   return 1;
++#endif
+ }
+
+diff -urN lua-5.1.4/src/ldebug.c lua-5.1.4.patched/src/ldebug.c
+--- lua-5.1.4/src/ldebug.c	2008-05-08 19:56:26.000000000 +0300
++++ lua-5.1.4.patched/src/ldebug.c	2008-11-15 12:56:07.000000000 +0200
+@@ -147,8 +147,8 @@
+ }
+
+
+-static void funcinfo (lua_Debug *ar, Closure *cl) {
+-  if (cl->c.isC) {
++static void funcinfo (lua_Debug *ar, Closure *cl, void *plight) {
++  if (plight || cl->c.isC) {
+     ar->source = "=[C]";
+     ar->linedefined = -1;
+     ar->lastlinedefined = -1;
+@@ -191,16 +191,16 @@
+
+
+ static int auxgetinfo (lua_State *L, const char *what, lua_Debug *ar,
+-                    Closure *f, CallInfo *ci) {
++                    Closure *f, void *plight, CallInfo *ci) {
+   int status = 1;
+-  if (f == NULL) {
++  if (plight == NULL && f == NULL) {
+     info_tailcall(ar);
+     return status;
+   }
+   for (; *what; what++) {
+     switch (*what) {
+       case 'S': {
+-        funcinfo(ar, f);
++        funcinfo(ar, f, plight);
+         break;
+       }
+       case 'l': {
+@@ -208,7 +208,7 @@
+         break;
+       }
+       case 'u': {
+-        ar->nups = f->c.nupvalues;
++        ar->nups = f ? f->c.nupvalues : 0;
+         break;
+       }
+       case 'n': {
+@@ -233,23 +233,34 @@
+   int status;
+   Closure *f = NULL;
+   CallInfo *ci = NULL;
++  void *plight = NULL;
+   lua_lock(L);
+   if (*what == '>') {
+     StkId func = L->top - 1;
+-    luai_apicheck(L, ttisfunction(func));
++    luai_apicheck(L, ttisfunction(func) || ttislightfunction(func));
+     what++;  /* skip the '>' */
+-    f = clvalue(func);
++    if (ttisfunction(func))
++      f = clvalue(func);
++    else
++      plight = fvalue(func);
+     L->top--;  /* pop function */
+   }
+   else if (ar->i_ci != 0) {  /* no tail call? */
+     ci = L->base_ci + ar->i_ci;
+-    lua_assert(ttisfunction(ci->func));
+-    f = clvalue(ci->func);
++    lua_assert(ttisfunction(ci->func) || ttislightfunction(ci->func));
++    if (ttisfunction(ci->func))
++      f = clvalue(ci->func);
++    else
++      plight = fvalue(ci->func);
+   }
+-  status = auxgetinfo(L, what, ar, f, ci);
++  status = auxgetinfo(L, what, ar, f, plight, ci);
+   if (strchr(what, 'f')) {
+-    if (f == NULL) setnilvalue(L->top);
+-    else setclvalue(L, L->top, f);
++    if (f != NULL)
++      setclvalue(L, L->top, f)
++    else if (plight != NULL)
++      setfvalue(L->top, plight)
++    else
++      setnilvalue(L->top);
+     incr_top(L);
+   }
+   if (strchr(what, 'L'))
+@@ -618,7 +629,7 @@
+ void luaG_errormsg (lua_State *L) {
+   if (L->errfunc != 0) {  /* is there an error handling function? */
+     StkId errfunc = restorestack(L, L->errfunc);
+-    if (!ttisfunction(errfunc)) luaD_throw(L, LUA_ERRERR);
++    if (!ttisfunction(errfunc) && !ttislightfunction(errfunc)) luaD_throw(L, LUA_ERRERR);
+     setobjs2s(L, L->top, L->top - 1);  /* move argument */
+     setobjs2s(L, L->top - 1, errfunc);  /* push function */
+     incr_top(L);
+diff -urN lua-5.1.4/src/ldo.c lua-5.1.4.patched/src/ldo.c
+--- lua-5.1.4/src/ldo.c	2008-01-19 00:31:22.000000000 +0200
++++ lua-5.1.4.patched/src/ldo.c	2008-11-17 23:21:25.000000000 +0200
+@@ -262,14 +262,15 @@
+
+
+ int luaD_precall (lua_State *L, StkId func, int nresults) {
+-  LClosure *cl;
+   ptrdiff_t funcr;
+-  if (!ttisfunction(func)) /* `func' is not a function? */
++  LClosure *cl = NULL;
++  if (!ttisfunction(func) && !ttislightfunction(func)) /* `func' is not a function? */
+     func = tryfuncTM(L, func);  /* check the `function' tag method */
+   funcr = savestack(L, func);
+-  cl = &clvalue(func)->l;
++  if (ttisfunction(func))
++    cl = &clvalue(func)->l;
+   L->ci->savedpc = L->savedpc;
+-  if (!cl->isC) {  /* Lua function? prepare its call */
++  if (cl && !cl->isC) {  /* Lua function? prepare its call */
+     CallInfo *ci;
+     StkId st, base;
+     Proto *p = cl->p;
+@@ -316,7 +317,10 @@
+     if (L->hookmask & LUA_MASKCALL)
+       luaD_callhook(L, LUA_HOOKCALL, -1);
+     lua_unlock(L);
+-    n = (*curr_func(L)->c.f)(L);  /* do the actual call */
++    if (ttisfunction(func))
++      n = (*curr_func(L)->c.f)(L);  /* do the actual call */
++    else
++      n = ((lua_CFunction)fvalue(func))(L);  /* do the actual call */
+     lua_lock(L);
+     if (n < 0)  /* yielding? */
+       return PCRYIELD;
+diff -urN lua-5.1.4/src/linit.c lua-5.1.4.patched/src/linit.c
+--- lua-5.1.4/src/linit.c	2007-12-27 15:02:25.000000000 +0200
++++ lua-5.1.4.patched/src/linit.c	2008-11-16 21:25:53.000000000 +0200
+@@ -12,20 +12,41 @@
+
+ #include "lualib.h"
+ #include "lauxlib.h"
+-
++#include "lrotable.h"
+
+ static const luaL_Reg lualibs[] = {
+   {"", luaopen_base},
+   {LUA_LOADLIBNAME, luaopen_package},
+-  {LUA_TABLIBNAME, luaopen_table},
+   {LUA_IOLIBNAME, luaopen_io},
+-  {LUA_OSLIBNAME, luaopen_os},
+   {LUA_STRLIBNAME, luaopen_string},
++#if LUA_OPTIMIZE_MEMORY == 0
+   {LUA_MATHLIBNAME, luaopen_math},
++  {LUA_OSLIBNAME, luaopen_os},
++  {LUA_TABLIBNAME, luaopen_table},
+   {LUA_DBLIBNAME, luaopen_debug},
++#endif
+   {NULL, NULL}
+ };
+
++/* The read-only tables are defined here */
++extern const luaL_Reg mathlib[];
++extern const luaR_value_entry mathlib_vals[];
++extern const luaL_Reg syslib[];
++extern const luaL_Reg tab_funcs[];
++extern const luaL_Reg dblib[];
++extern const luaL_Reg co_funcs[];
++const luaR_table lua_rotable[] =
++{
++#if LUA_OPTIMIZE_MEMORY > 0
++  {LUA_MATHLIBNAME, mathlib, mathlib_vals},
++  {LUA_OSLIBNAME, syslib, NULL},
++  {LUA_TABLIBNAME, tab_funcs, NULL},
++  {LUA_DBLIBNAME, dblib, NULL},
++  {LUA_COLIBNAME, co_funcs, NULL},
++#endif
++  {NULL, NULL, NULL}
++};
++
+
+ LUALIB_API void luaL_openlibs (lua_State *L) {
+   const luaL_Reg *lib = lualibs;
+@@ -35,4 +56,3 @@
+     lua_call(L, 1, 0);
+   }
+ }
+-
+diff -urN lua-5.1.4/src/lmathlib.c lua-5.1.4.patched/src/lmathlib.c
+--- lua-5.1.4/src/lmathlib.c	2007-12-27 15:02:25.000000000 +0200
++++ lua-5.1.4.patched/src/lmathlib.c	2008-11-17 17:09:50.000000000 +0200
+@@ -15,7 +15,7 @@
+
+ #include "lauxlib.h"
+ #include "lualib.h"
+-
++#include "lrotable.h"
+
+ #undef PI
+ #define PI (3.14159265358979323846)
+@@ -212,19 +212,22 @@
+ }
+
+
+-static const luaL_Reg mathlib[] = {
++const luaL_reg mathlib[] = {
+   {"abs",   math_abs},
+   {"acos",  math_acos},
+   {"asin",  math_asin},
+   {"atan2", math_atan2},
+   {"atan",  math_atan},
+   {"ceil",  math_ceil},
+-  {"cosh",   math_cosh},
++  {"cosh",  math_cosh},
+   {"cos",   math_cos},
+   {"deg",   math_deg},
+   {"exp",   math_exp},
+   {"floor", math_floor},
+-  {"fmod",   math_fmod},
++  {"fmod",  math_fmod},
++#if LUA_OPTIMIZE_MEMORY > 0 && defined(LUA_COMPAT_MOD)
++  {"mod",   math_fmod},
++#endif
+   {"frexp", math_frexp},
+   {"ldexp", math_ldexp},
+   {"log10", math_log10},
+@@ -244,11 +247,19 @@
+   {NULL, NULL}
+ };
+
++const luaR_value_entry mathlib_vals[] = {
++  {"pi",   PI},
++  {"huge", HUGE_VAL},
++  {NULL, 0}
++};
+
+ /*
+ ** Open math library
+ */
+ LUALIB_API int luaopen_math (lua_State *L) {
++#if LUA_OPTIMIZE_MEMORY > 0
++  return 0;
++#else
+   luaL_register(L, LUA_MATHLIBNAME, mathlib);
+   lua_pushnumber(L, PI);
+   lua_setfield(L, -2, "pi");
+@@ -259,5 +270,6 @@
+   lua_setfield(L, -2, "mod");
+ #endif
+   return 1;
++#endif
+ }
+
+diff -urN lua-5.1.4/src/lobject.c lua-5.1.4.patched/src/lobject.c
+--- lua-5.1.4/src/lobject.c	2007-12-27 15:02:25.000000000 +0200
++++ lua-5.1.4.patched/src/lobject.c	2008-11-15 13:12:29.000000000 +0200
+@@ -79,6 +79,8 @@
+     case LUA_TBOOLEAN:
+       return bvalue(t1) == bvalue(t2);  /* boolean true must be 1 !! */
+     case LUA_TLIGHTUSERDATA:
++    case LUA_TROTABLE:
++    case LUA_TLIGHTFUNCTION:
+       return pvalue(t1) == pvalue(t2);
+     default:
+       lua_assert(iscollectable(t1));
+diff -urN lua-5.1.4/src/lobject.h lua-5.1.4.patched/src/lobject.h
+--- lua-5.1.4/src/lobject.h	2008-08-06 16:29:48.000000000 +0300
++++ lua-5.1.4.patched/src/lobject.h	2008-11-16 20:13:28.000000000 +0200
+@@ -85,11 +85,15 @@
+ #define ttisuserdata(o)	(ttype(o) == LUA_TUSERDATA)
+ #define ttisthread(o)	(ttype(o) == LUA_TTHREAD)
+ #define ttislightuserdata(o)	(ttype(o) == LUA_TLIGHTUSERDATA)
++#define ttisrotable(o) (ttype(o) == LUA_TROTABLE)
++#define ttislightfunction(o)  (ttype(o) == LUA_TLIGHTFUNCTION)
+
+ /* Macros to access values */
+ #define ttype(o)	((o)->tt)
+ #define gcvalue(o)	check_exp(iscollectable(o), (o)->value.gc)
+ #define pvalue(o)	check_exp(ttislightuserdata(o), (o)->value.p)
++#define rvalue(o)	check_exp(ttisrotable(o), (o)->value.p)
++#define fvalue(o) check_exp(ttislightfunction(o), (o)->value.p)
+ #define nvalue(o)	check_exp(ttisnumber(o), (o)->value.n)
+ #define rawtsvalue(o)	check_exp(ttisstring(o), &(o)->value.gc->ts)
+ #define tsvalue(o)	(&rawtsvalue(o)->tsv)
+@@ -121,6 +125,12 @@
+
+ #define setpvalue(obj,x) \
+   { TValue *i_o=(obj); i_o->value.p=(x); i_o->tt=LUA_TLIGHTUSERDATA; }
++
++#define setrvalue(obj,x) \
++  { TValue *i_o=(obj); i_o->value.p=(x); i_o->tt=LUA_TROTABLE; }
++
++#define setfvalue(obj,x) \
++  { TValue *i_o=(obj); i_o->value.p=(x); i_o->tt=LUA_TLIGHTFUNCTION; }
+
+ #define setbvalue(obj,x) \
+   { TValue *i_o=(obj); i_o->value.b=(x); i_o->tt=LUA_TBOOLEAN; }
+@@ -312,7 +322,7 @@
+ } Closure;
+
+
+-#define iscfunction(o)	(ttype(o) == LUA_TFUNCTION && clvalue(o)->c.isC)
++#define iscfunction(o)	((ttype(o) == LUA_TFUNCTION && clvalue(o)->c.isC)||(ttype(o)==LUA_TLIGHTFUNCTION))
+ #define isLfunction(o)	(ttype(o) == LUA_TFUNCTION && !clvalue(o)->c.isC)
+
+
+diff -urN lua-5.1.4/src/lrotable.c lua-5.1.4.patched/src/lrotable.c
+--- lua-5.1.4/src/lrotable.c	1970-01-01 02:00:00.000000000 +0200
++++ lua-5.1.4.patched/src/lrotable.c	2008-11-15 14:07:55.000000000 +0200
+@@ -0,0 +1,80 @@
++/* Read-only tables for Lua */
++
++#include <string.h>
++#include "lrotable.h"
++#include "lua.h"
++#include "lauxlib.h"
++
++/* Local defines */
++#define LUAR_FINDFUNCTION     0
++#define LUAR_FINDVALUE        1
++
++/* Externally defined read-only table array */
++extern const luaR_table lua_rotable[];
++
++/* Find a global "read only table" in the constant lua_rotable array */
++luaR_result luaR_findglobal(const char *name, lu_byte *ptype) {
++  unsigned i;
++  *ptype = LUA_TNIL;
++  if (strlen(name) > LUA_MAX_ROTABLE_NAME)
++    return 0;
++  for (i=0; lua_rotable[i].name; i ++)
++    if (!strcmp(lua_rotable[i].name, name)) {
++      *ptype = LUA_TROTABLE;
++      return i+1;
++    }
++  return 0;
++}
++
++/* Utility function: find a key in a given table (of functions or constants) */
++static luaR_result luaR_findkey(const void *where, const char *key, int type, int *found) {
++  const char *pname;
++  const luaL_reg *pf = (luaL_reg*)where;
++  const luaR_value_entry *pv = (luaR_value_entry*)where;
++  int isfunction = type == LUAR_FINDFUNCTION;
++  *found = 0;
++  if(!where)
++    return 0;
++  while(1) {
++    if (!(pname = isfunction ? pf->name : pv->name))
++      break;
++    if (!strcmp(pname, key)) {
++      *found = 1;
++      return isfunction ? (luaR_result)(size_t)pf->func : (luaR_result)pv->value;
++    }
++    pf ++; pv ++;
++  }
++  return 0;
++}
++
++int luaR_findfunction(lua_State *L, const luaL_reg *ptable) {
++  int found;
++  const char *key = luaL_checkstring(L, 2);
++  luaR_result res = luaR_findkey(ptable, key, LUAR_FINDFUNCTION, &found);
++  if (found)
++    lua_pushlightfunction(L, (void*)(size_t)res);
++  else
++    lua_pushnil(L);
++  return 1;
++}
++
++luaR_result luaR_findentry(void *data, const char *key, lu_byte *ptype) {
++  int found;
++  unsigned idx = (unsigned)data - 1;
++  luaR_result res;
++  *ptype = LUA_TNIL;
++  /* First look at the functions */
++  res = luaR_findkey(lua_rotable[idx].pfuncs, key, LUAR_FINDFUNCTION, &found);
++  if (found) {
++    *ptype = LUA_TLIGHTFUNCTION;
++    return res;
++  } else {
++    /* Then at the values */
++    res = luaR_findkey(lua_rotable[idx].pvalues, key, LUAR_FINDVALUE, &found);
++    if(found) {
++      *ptype = LUA_TNUMBER;
++      return res;
++    }
++  }
++  return 0;
++}
+diff -urN lua-5.1.4/src/lrotable.h lua-5.1.4.patched/src/lrotable.h
+--- lua-5.1.4/src/lrotable.h	1970-01-01 02:00:00.000000000 +0200
++++ lua-5.1.4.patched/src/lrotable.h	2008-11-15 14:08:40.000000000 +0200
+@@ -0,0 +1,31 @@
++// Read-only tables for Lua
++
++#ifndef lrotable_h
++#define lrotable_h
++
++#include "lua.h"
++#include "llimits.h"
++#include "lauxlib.h"
++
++typedef lua_Number luaR_result;
++
++// A number entry in the read only table
++typedef struct
++{
++  const char *name;
++  lua_Number value;
++} luaR_value_entry;
++
++// A mapping between table name and its entries
++typedef struct
++{
++  const char *name;
++  const luaL_reg *pfuncs;
++  const luaR_value_entry *pvalues;
++} luaR_table;
++
++luaR_result luaR_findglobal(const char *key, lu_byte *ptype);
++int luaR_findfunction(lua_State *L, const luaL_reg *ptable);
++luaR_result luaR_findentry(void *data, const char *key, lu_byte *ptype);
++
++#endif
+diff -urN lua-5.1.4/src/lstate.h lua-5.1.4.patched/src/lstate.h
+--- lua-5.1.4/src/lstate.h	2008-01-03 17:20:39.000000000 +0200
++++ lua-5.1.4.patched/src/lstate.h	2008-11-15 13:13:28.000000000 +0200
+@@ -56,9 +56,9 @@
+
+
+
+-#define curr_func(L)	(clvalue(L->ci->func))
+-#define ci_func(ci)	(clvalue((ci)->func))
+-#define f_isLua(ci)	(!ci_func(ci)->c.isC)
++#define curr_func(L)	(ttisfunction(L->ci->func) ? clvalue(L->ci->func) : NULL)
++#define ci_func(ci)	(ttisfunction((ci)->func) ? clvalue((ci)->func) : NULL)
++#define f_isLua(ci)	(!ttislightfunction((ci)->func) && !ci_func(ci)->c.isC)
+ #define isLua(ci)	(ttisfunction((ci)->func) && f_isLua(ci))
+
+
+diff -urN lua-5.1.4/src/lstrlib.c lua-5.1.4.patched/src/lstrlib.c
+--- lua-5.1.4/src/lstrlib.c	2008-07-11 20:27:21.000000000 +0300
++++ lua-5.1.4.patched/src/lstrlib.c	2008-11-17 17:07:19.000000000 +0200
+@@ -18,7 +18,7 @@
+
+ #include "lauxlib.h"
+ #include "lualib.h"
+-
++#include "lrotable.h"
+
+ /* macro to `unsign' a character */
+ #define uchar(c)        ((unsigned char)(c))
+@@ -618,7 +618,8 @@
+       add_s(ms, b, s, e);
+       return;
+     }
+-    case LUA_TFUNCTION: {
++    case LUA_TFUNCTION:
++    case LUA_TLIGHTFUNCTION: {
+       int n;
+       lua_pushvalue(L, 3);
+       n = push_captures(ms, s, e);
+@@ -652,8 +653,9 @@
+   MatchState ms;
+   luaL_Buffer b;
+   luaL_argcheck(L, tr == LUA_TNUMBER || tr == LUA_TSTRING ||
+-                   tr == LUA_TFUNCTION || tr == LUA_TTABLE, 3,
+-                      "string/function/table expected");
++                   tr == LUA_TFUNCTION || tr == LUA_TTABLE ||
++                   tr == LUA_TLIGHTFUNCTION, 3,
++                   "string/function/table/lightfunction expected");
+   luaL_buffinit(L, &b);
+   ms.L = L;
+   ms.src_init = src;
+@@ -821,28 +823,55 @@
+   return 1;
+ }
+
++/* Compile the correct version of "gfind" */
++#if LUA_OPTIMIZE_MEMORY > 0 && defined(LUA_COMPAT_GFIND)
++#define LUA_GFIND_DECL	{"gfind", gmatch}
++#else
++#define LUA_GFIND_DECL  {"gfind", gfind_nodef}
++#endif
++
++#define LUA_STRLIB_FUNCLIST\
++  {"byte", str_byte},\
++  {"char", str_char},\
++  {"dump", str_dump},\
++  {"find", str_find},\
++  {"format", str_format},\
++  LUA_GFIND_DECL,\
++  {"gmatch", gmatch},\
++  {"gsub", str_gsub},\
++  {"len", str_len},\
++  {"lower", str_lower},\
++  {"match", str_match},\
++  {"rep", str_rep},\
++  {"reverse", str_reverse},\
++  {"sub", str_sub},\
++  {"upper", str_upper}
++
++#if LUA_OPTIMIZE_MEMORY == 0
++static const luaL_Reg strlib[] = {
++  LUA_STRLIB_FUNCLIST,
++  {NULL, NULL}
++};
++#else
++static const luaL_Reg strlib_funcs[] = {
++  LUA_STRLIB_FUNCLIST,
++  {NULL, NULL}
++};
++
++static int str_index(lua_State *L)
++{
++  return luaR_findfunction(L, strlib_funcs);
++}
+
+ static const luaL_Reg strlib[] = {
+-  {"byte", str_byte},
+-  {"char", str_char},
+-  {"dump", str_dump},
+-  {"find", str_find},
+-  {"format", str_format},
+-  {"gfind", gfind_nodef},
+-  {"gmatch", gmatch},
+-  {"gsub", str_gsub},
+-  {"len", str_len},
+-  {"lower", str_lower},
+-  {"match", str_match},
+-  {"rep", str_rep},
+-  {"reverse", str_reverse},
+-  {"sub", str_sub},
+-  {"upper", str_upper},
++  {"__index", str_index},
+   {NULL, NULL}
+ };
++#endif
+
+
+ static void createmetatable (lua_State *L) {
++#if LUA_OPTIMIZE_MEMORY == 0
+   lua_createtable(L, 0, 1);  /* create metatable for strings */
+   lua_pushliteral(L, "");  /* dummy string */
+   lua_pushvalue(L, -2);
+@@ -851,6 +880,12 @@
+   lua_pushvalue(L, -2);  /* string library... */
+   lua_setfield(L, -2, "__index");  /* ...is the __index metamethod */
+   lua_pop(L, 1);  /* pop metatable */
++#else
++  lua_pushliteral(L,"");
++  lua_pushvalue(L, -2);
++  lua_setmetatable(L, -2);
++  lua_pop(L, 1);
++#endif
+ }
+
+
+@@ -859,11 +894,13 @@
+ */
+ LUALIB_API int luaopen_string (lua_State *L) {
+   luaL_register(L, LUA_STRLIBNAME, strlib);
+-#if defined(LUA_COMPAT_GFIND)
++#if LUA_OPTIMIZE_MEMORY > 0
++  lua_pushvalue(L, -1);
++  lua_setmetatable(L, -2);
++#elif defined(LUA_COMPAT_GFIND)
+   lua_getfield(L, -1, "gmatch");
+   lua_setfield(L, -2, "gfind");
+ #endif
+   createmetatable(L);
+-  return 1;
++  return 1;
+ }
+-
+diff -urN lua-5.1.4/src/ltable.c lua-5.1.4.patched/src/ltable.c
+--- lua-5.1.4/src/ltable.c	2007-12-28 17:32:23.000000000 +0200
++++ lua-5.1.4.patched/src/ltable.c	2008-11-15 13:13:49.000000000 +0200
+@@ -106,6 +106,8 @@
+     case LUA_TBOOLEAN:
+       return hashboolean(t, bvalue(key));
+     case LUA_TLIGHTUSERDATA:
++    case LUA_TROTABLE:
++    case LUA_TLIGHTFUNCTION:
+       return hashpointer(t, pvalue(key));
+     default:
+       return hashpointer(t, gcvalue(key));
+diff -urN lua-5.1.4/src/ltablib.c lua-5.1.4.patched/src/ltablib.c
+--- lua-5.1.4/src/ltablib.c	2008-02-14 18:46:58.000000000 +0200
++++ lua-5.1.4.patched/src/ltablib.c	2008-11-17 23:24:43.000000000 +0200
+@@ -22,7 +22,7 @@
+ static int foreachi (lua_State *L) {
+   int i;
+   int n = aux_getn(L, 1);
+-  luaL_checktype(L, 2, LUA_TFUNCTION);
++  luaL_checkanyfunction(L, 2);
+   for (i=1; i <= n; i++) {
+     lua_pushvalue(L, 2);  /* function */
+     lua_pushinteger(L, i);  /* 1st argument */
+@@ -38,7 +38,7 @@
+
+ static int foreach (lua_State *L) {
+   luaL_checktype(L, 1, LUA_TTABLE);
+-  luaL_checktype(L, 2, LUA_TFUNCTION);
++  luaL_checkanyfunction(L, 2);
+   lua_pushnil(L);  /* first key */
+   while (lua_next(L, 1)) {
+     lua_pushvalue(L, 2);  /* function */
+@@ -266,7 +266,7 @@
+ /* }====================================================== */
+
+
+-static const luaL_Reg tab_funcs[] = {
++const luaL_Reg tab_funcs[] = {
+   {"concat", tconcat},
+   {"foreach", foreach},
+   {"foreachi", foreachi},
+@@ -281,7 +281,10 @@
+
+
+ LUALIB_API int luaopen_table (lua_State *L) {
++#if LUA_OPTIMIZE_MEMORY > 0
++  return 0;
++#else
+   luaL_register(L, LUA_TABLIBNAME, tab_funcs);
+   return 1;
++#endif
+ }
+-
+diff -urN lua-5.1.4/src/ltm.c lua-5.1.4.patched/src/ltm.c
+--- lua-5.1.4/src/ltm.c	2007-12-27 15:02:25.000000000 +0200
++++ lua-5.1.4.patched/src/ltm.c	2008-11-16 20:09:28.000000000 +0200
+@@ -21,7 +21,7 @@
+
+
+ const char *const luaT_typenames[] = {
+-  "nil", "boolean", "userdata", "number",
++  "nil", "boolean", "rotable", "lightfunction", "userdata", "number",
+   "string", "table", "function", "userdata", "thread",
+   "proto", "upval"
+ };
+diff -urN lua-5.1.4/src/luaconf.h lua-5.1.4.patched/src/luaconf.h
+--- lua-5.1.4/src/luaconf.h	2008-02-11 18:25:08.000000000 +0200
++++ lua-5.1.4.patched/src/luaconf.h	2008-11-17 16:33:33.000000000 +0200
+@@ -757,7 +757,20 @@
+ ** without modifying the main part of the file.
+ */
+
++#define LUA_MAX_ROTABLE_NAME      16
+
++/* LUA_OPTIMIZE_MEMORY:
++   0 - no optimizations
++   1 - optimize while maitaining full compatibility with the test suite
++   2 - aggresive optimizations (breaks compatibility with some tests)
++*/
++#ifndef LUA_OPTIMIZE_MEMORY
++#define LUA_OPTIMIZE_MEMORY				0
++#endif
++
++#if LUA_OPTIMIZE_MEMORY == 2 && LUA_USE_POPEN
++#error "Pipes not supported in aggresive optimization mode (LUA_OPTIMIZE_MEMORY=2)"
++#endif
+
+ #endif
+
+diff -urN lua-5.1.4/src/lua.h lua-5.1.4.patched/src/lua.h
+--- lua-5.1.4/src/lua.h	2008-08-06 16:30:12.000000000 +0300
++++ lua-5.1.4.patched/src/lua.h	2008-11-15 13:17:08.000000000 +0200
+@@ -73,15 +73,15 @@
+
+ #define LUA_TNIL		0
+ #define LUA_TBOOLEAN		1
+-#define LUA_TLIGHTUSERDATA	2
+-#define LUA_TNUMBER		3
+-#define LUA_TSTRING		4
+-#define LUA_TTABLE		5
+-#define LUA_TFUNCTION		6
+-#define LUA_TUSERDATA		7
+-#define LUA_TTHREAD		8
+-
+-
++#define LUA_TROTABLE  2
++#define LUA_TLIGHTFUNCTION  3
++#define LUA_TLIGHTUSERDATA	4
++#define LUA_TNUMBER		5
++#define LUA_TSTRING		6
++#define LUA_TTABLE		7
++#define LUA_TFUNCTION		8
++#define LUA_TUSERDATA		9
++#define LUA_TTHREAD		10
+
+ /* minimum Lua stack available to a C function */
+ #define LUA_MINSTACK	20
+@@ -168,6 +168,8 @@
+ LUA_API void  (lua_pushcclosure) (lua_State *L, lua_CFunction fn, int n);
+ LUA_API void  (lua_pushboolean) (lua_State *L, int b);
+ LUA_API void  (lua_pushlightuserdata) (lua_State *L, void *p);
++LUA_API void  (lua_pushlightfunction) (lua_State *L, void *p);
++LUA_API void  (lua_pushrotable) (lua_State *L, void *p);
+ LUA_API int   (lua_pushthread) (lua_State *L);
+
+
+@@ -262,6 +264,7 @@
+ #define lua_strlen(L,i)		lua_objlen(L, (i))
+
+ #define lua_isfunction(L,n)	(lua_type(L, (n)) == LUA_TFUNCTION)
++#define lua_islightfunction(L,n) (lua_type(L, (n)) == LUA_TLIGHTFUNCTION)
+ #define lua_istable(L,n)	(lua_type(L, (n)) == LUA_TTABLE)
+ #define lua_islightuserdata(L,n)	(lua_type(L, (n)) == LUA_TLIGHTUSERDATA)
+ #define lua_isnil(L,n)		(lua_type(L, (n)) == LUA_TNIL)
+diff -urN lua-5.1.4/src/lvm.c lua-5.1.4.patched/src/lvm.c
+--- lua-5.1.4/src/lvm.c	2007-12-28 17:32:23.000000000 +0200
++++ lua-5.1.4.patched/src/lvm.c	2008-11-17 16:38:45.000000000 +0200
+@@ -25,7 +25,7 @@
+ #include "ltable.h"
+ #include "ltm.h"
+ #include "lvm.h"
+-
++#include "lrotable.h"
+
+
+ /* limit for table tag-method chains (to avoid loops) */
+@@ -104,9 +104,31 @@
+   luaD_call(L, L->top - 4, 0);
+ }
+
++static void lua_getcstr(char *dest, const TString *src, size_t maxsize) {
++  if (src->tsv.len+1 > maxsize)
++    dest[0] = '\0';
++  else {
++    memcpy(dest, getstr(src), src->tsv.len);
++    dest[src->tsv.len] = '\0';
++  }
++}
+
+-void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
++void luaV_gettable(lua_State *L, const TValue *t, TValue *key, StkId val) {
+   int loop;
++  if (ttisrotable(t)) {
++    setnilvalue(val);
++    if (ttisstring(key)) {
++      char keyname[LUA_MAX_ROTABLE_NAME + 1];
++      lu_byte keytype;
++      lua_getcstr(keyname, rawtsvalue(key), LUA_MAX_ROTABLE_NAME);
++      luaR_result res = luaR_findentry(rvalue(t), keyname, &keytype);
++      if (keytype == LUA_TLIGHTFUNCTION)
++        setfvalue(val, (void*)(size_t)res)
++      else if (keytype == LUA_TNUMBER)
++        setnvalue(val, (lua_Number)res)
++    }
++    return;
++  }
+   for (loop = 0; loop < MAXTAGLOOP; loop++) {
+     const TValue *tm;
+     if (ttistable(t)) {  /* `t' is a table? */
+@@ -121,7 +143,7 @@
+     }
+     else if (ttisnil(tm = luaT_gettmbyobj(L, t, TM_INDEX)))
+       luaG_typeerror(L, t, "index");
+-    if (ttisfunction(tm)) {
++    if (ttisfunction(tm) || ttislightfunction(tm)) {
+       callTMres(L, val, tm, t, key);
+       return;
+     }
+@@ -255,7 +277,10 @@
+     case LUA_TNIL: return 1;
+     case LUA_TNUMBER: return luai_numeq(nvalue(t1), nvalue(t2));
+     case LUA_TBOOLEAN: return bvalue(t1) == bvalue(t2);  /* true must be 1 !! */
+-    case LUA_TLIGHTUSERDATA: return pvalue(t1) == pvalue(t2);
++    case LUA_TLIGHTUSERDATA:
++    case LUA_TROTABLE:
++    case LUA_TLIGHTFUNCTION:
++      return pvalue(t1) == pvalue(t2);
+     case LUA_TUSERDATA: {
+       if (uvalue(t1) == uvalue(t2)) return 1;
+       tm = get_compTM(L, uvalue(t1)->metatable, uvalue(t2)->metatable,
+@@ -430,6 +455,20 @@
+         TValue *rb = KBx(i);
+         sethvalue(L, &g, cl->env);
+         lua_assert(ttisstring(rb));
+-        Protect(luaV_gettable(L, &g, rb, ra));
++#if LUA_OPTIMIZE_MEMORY > 0
++        /* First try to look for a rotable with this name */
++        char keyname[LUA_MAX_ROTABLE_NAME + 1];
++        lu_byte keytype;
++        lua_getcstr(keyname, rawtsvalue(rb), LUA_MAX_ROTABLE_NAME);
++        luaR_result res = luaR_findglobal(keyname, &keytype);
++        if (keytype == LUA_TROTABLE)
++          setrvalue(ra, (void*)(size_t)res)
++        else if (keytype == LUA_TLIGHTFUNCTION)
++          setfvalue(ra, (void*)(size_t)res)
++        else if (keytype == LUA_TNUMBER)
++          setnvalue(ra, (lua_Number)res)
++        else
++#endif
++          Protect(luaV_gettable(L, &g, rb, ra));
+         continue;
+       }
+       case OP_GETTABLE: {

@@ -1,0 +1,245 @@
+diff --git a/libraries/lua/lbaselib.c b/libraries/lua/lbaselib.c
+index 8823c5f..ad558f9 100644
+--- a/libraries/lua/lbaselib.c
++++ b/libraries/lua/lbaselib.c
+@@ -27,6 +27,9 @@
+ #endif
+ 
+ 
++void my_serial_printf(char *fmt, ... );
++void my_serial_print(const char *s);
++
+ /*
+ ** If your system does not support `stdout', you can just remove this function.
+ ** If you need, you can define your own `print' function, following this
+@@ -46,11 +49,11 @@ static int luaB_print (lua_State *L) {
+     if (s == NULL)
+       return luaL_error(L, LUA_QL("tostring") " must return a string to "
+                            LUA_QL("print"));
+-    if (i>1) fputs("\t", stdout);
+-    fputs(s, stdout);
++    if (i>1) my_serial_print("\t");
++    my_serial_print(s);
+     lua_pop(L, 1);  /* pop result */
+   }
+-  fputs("\n", stdout);
++  my_serial_print("\n");
+   return 0;
+ }
+ 
+diff --git a/libraries/lua/print.c b/libraries/lua/print.c
+index 1e625bf..4fc6f8b 100644
+--- a/libraries/lua/print.c
++++ b/libraries/lua/print.c
+@@ -7,7 +7,7 @@
+ #include <ctype.h>
+ #include <stdio.h>
+ 
+-void serial_printf(char *fmt, ... );
++void my_serial_printf(char *fmt, ... );
+ 
+ #define luac_c
+ #define LUA_CORE
+@@ -32,19 +32,19 @@ static void PrintString(const TString* ts)
+   int c=s[i];
+   switch (c)
+   {
+-   case '"': serial_printf("\\\""); break;
+-   case '\\': serial_printf("\\\\"); break;
+-   case '\a': serial_printf("\\a"); break;
+-   case '\b': serial_printf("\\b"); break;
+-   case '\f': serial_printf("\\f"); break;
+-   case '\n': serial_printf("\\n"); break;
+-   case '\r': serial_printf("\\r"); break;
+-   case '\t': serial_printf("\\t"); break;
+-   case '\v': serial_printf("\\v"); break;
++   case '"': my_serial_printf("\\\""); break;
++   case '\\': my_serial_printf("\\\\"); break;
++   case '\a': my_serial_printf("\\a"); break;
++   case '\b': my_serial_printf("\\b"); break;
++   case '\f': my_serial_printf("\\f"); break;
++   case '\n': my_serial_printf("\\n"); break;
++   case '\r': my_serial_printf("\\r"); break;
++   case '\t': my_serial_printf("\\t"); break;
++   case '\v': my_serial_printf("\\v"); break;
+    default:	if (isprint((unsigned char)c))
+    			putchar(c);
+ 		else
+-			serial_printf("\\%03u",(unsigned char)c);
++			my_serial_printf("\\%03u",(unsigned char)c);
+   }
+  }
+  putchar('"');
+@@ -56,19 +56,19 @@ static void PrintConstant(const Proto* f, int i)
+  switch (ttype(o))
+  {
+   case LUA_TNIL:
+-	serial_printf("nil");
++	my_serial_printf("nil");
+ 	break;
+   case LUA_TBOOLEAN:
+-	serial_printf(bvalue(o) ? "true" : "false");
++	my_serial_printf(bvalue(o) ? "true" : "false");
+ 	break;
+   case LUA_TNUMBER:
+-	serial_printf(LUA_NUMBER_FMT,nvalue(o));
++	my_serial_printf(LUA_NUMBER_FMT,nvalue(o));
+ 	break;
+   case LUA_TSTRING:
+ 	PrintString(rawtsvalue(o));
+ 	break;
+   default:				/* cannot happen */
+-	serial_printf("? type=%d",ttype(o));
++	my_serial_printf("? type=%d",ttype(o));
+ 	break;
+  }
+ }
+@@ -87,39 +87,39 @@ static void PrintCode(const Proto* f)
+   int bx=GETARG_Bx(i);
+   int sbx=GETARG_sBx(i);
+   int line=getline(f,pc);
+-  serial_printf("\t%d\t",pc+1);
+-  if (line>0) serial_printf("[%d]\t",line); else serial_printf("[-]\t");
+-  serial_printf("%-9s\t",luaP_opnames[o]);
++  my_serial_printf("\t%d\t",pc+1);
++  if (line>0) my_serial_printf("[%d]\t",line); else my_serial_printf("[-]\t");
++  my_serial_printf("%-9s\t",luaP_opnames[o]);
+   switch (getOpMode(o))
+   {
+    case iABC:
+-    serial_printf("%d",a);
+-    if (getBMode(o)!=OpArgN) serial_printf(" %d",ISK(b) ? (-1-INDEXK(b)) : b);
+-    if (getCMode(o)!=OpArgN) serial_printf(" %d",ISK(c) ? (-1-INDEXK(c)) : c);
++    my_serial_printf("%d",a);
++    if (getBMode(o)!=OpArgN) my_serial_printf(" %d",ISK(b) ? (-1-INDEXK(b)) : b);
++    if (getCMode(o)!=OpArgN) my_serial_printf(" %d",ISK(c) ? (-1-INDEXK(c)) : c);
+     break;
+    case iABx:
+-    if (getBMode(o)==OpArgK) serial_printf("%d %d",a,-1-bx); else serial_printf("%d %d",a,bx);
++    if (getBMode(o)==OpArgK) my_serial_printf("%d %d",a,-1-bx); else my_serial_printf("%d %d",a,bx);
+     break;
+    case iAsBx:
+-    if (o==OP_JMP) serial_printf("%d",sbx); else serial_printf("%d %d",a,sbx);
++    if (o==OP_JMP) my_serial_printf("%d",sbx); else my_serial_printf("%d %d",a,sbx);
+     break;
+   }
+   switch (o)
+   {
+    case OP_LOADK:
+-    serial_printf("\t; "); PrintConstant(f,bx);
++    my_serial_printf("\t; "); PrintConstant(f,bx);
+     break;
+    case OP_GETUPVAL:
+    case OP_SETUPVAL:
+-    serial_printf("\t; %s", (f->sizeupvalues>0) ? getstr(f->upvalues[b]) : "-");
++    my_serial_printf("\t; %s", (f->sizeupvalues>0) ? getstr(f->upvalues[b]) : "-");
+     break;
+    case OP_GETGLOBAL:
+    case OP_SETGLOBAL:
+-    serial_printf("\t; %s",svalue(&f->k[bx]));
++    my_serial_printf("\t; %s",svalue(&f->k[bx]));
+     break;
+    case OP_GETTABLE:
+    case OP_SELF:
+-    if (ISK(c)) { serial_printf("\t; "); PrintConstant(f,INDEXK(c)); }
++    if (ISK(c)) { my_serial_printf("\t; "); PrintConstant(f,INDEXK(c)); }
+     break;
+    case OP_SETTABLE:
+    case OP_ADD:
+@@ -132,28 +132,28 @@ static void PrintCode(const Proto* f)
+    case OP_LE:
+     if (ISK(b) || ISK(c))
+     {
+-     serial_printf("\t; ");
+-     if (ISK(b)) PrintConstant(f,INDEXK(b)); else serial_printf("-");
+-     serial_printf(" ");
+-     if (ISK(c)) PrintConstant(f,INDEXK(c)); else serial_printf("-");
++     my_serial_printf("\t; ");
++     if (ISK(b)) PrintConstant(f,INDEXK(b)); else my_serial_printf("-");
++     my_serial_printf(" ");
++     if (ISK(c)) PrintConstant(f,INDEXK(c)); else my_serial_printf("-");
+     }
+     break;
+    case OP_JMP:
+    case OP_FORLOOP:
+    case OP_FORPREP:
+-    serial_printf("\t; to %d",sbx+pc+2);
++    my_serial_printf("\t; to %d",sbx+pc+2);
+     break;
+    case OP_CLOSURE:
+-    serial_printf("\t; %p",VOID(f->p[bx]));
++    my_serial_printf("\t; %p",VOID(f->p[bx]));
+     break;
+    case OP_SETLIST:
+-    if (c==0) serial_printf("\t; %d",(int)code[++pc]);
+-    else serial_printf("\t; %d",c);
++    if (c==0) my_serial_printf("\t; %d",(int)code[++pc]);
++    else my_serial_printf("\t; %d",c);
+     break;
+    default:
+     break;
+   }
+-  serial_printf("\n");
++  my_serial_printf("\n");
+  }
+ }
+ 
+@@ -169,36 +169,36 @@ static void PrintHeader(const Proto* f)
+   s="(bstring)";
+  else
+   s="(string)";
+- serial_printf("\n%s <%s:%d,%d> (%d instruction%s, %d bytes at %p)\n",
++ my_serial_printf("\n%s <%s:%d,%d> (%d instruction%s, %d bytes at %p)\n",
+  	(f->linedefined==0)?"main":"function",s,
+ 	f->linedefined,f->lastlinedefined,
+ 	S(f->sizecode),f->sizecode*Sizeof(Instruction),VOID(f));
+- serial_printf("%d%s param%s, %d slot%s, %d upvalue%s, ",
++ my_serial_printf("%d%s param%s, %d slot%s, %d upvalue%s, ",
+ 	f->numparams,f->is_vararg?"+":"",SS(f->numparams),
+ 	S(f->maxstacksize),S(f->nups));
+- serial_printf("%d local%s, %d constant%s, %d function%s\n",
++ my_serial_printf("%d local%s, %d constant%s, %d function%s\n",
+ 	S(f->sizelocvars),S(f->sizek),S(f->sizep));
+ }
+ 
+ static void PrintConstants(const Proto* f)
+ {
+  int i,n=f->sizek;
+- serial_printf("constants (%d) for %p:\n",n,VOID(f));
++ my_serial_printf("constants (%d) for %p:\n",n,VOID(f));
+  for (i=0; i<n; i++)
+  {
+-  serial_printf("\t%d\t",i+1);
++  my_serial_printf("\t%d\t",i+1);
+   PrintConstant(f,i);
+-  serial_printf("\n");
++  my_serial_printf("\n");
+  }
+ }
+ 
+ static void PrintLocals(const Proto* f)
+ {
+  int i,n=f->sizelocvars;
+- serial_printf("locals (%d) for %p:\n",n,VOID(f));
++ my_serial_printf("locals (%d) for %p:\n",n,VOID(f));
+  for (i=0; i<n; i++)
+  {
+-  serial_printf("\t%d\t%s\t%d\t%d\n",
++  my_serial_printf("\t%d\t%s\t%d\t%d\n",
+   i,getstr(f->locvars[i].varname),f->locvars[i].startpc+1,f->locvars[i].endpc+1);
+  }
+ }
+@@ -206,11 +206,11 @@ static void PrintLocals(const Proto* f)
+ static void PrintUpvalues(const Proto* f)
+ {
+  int i,n=f->sizeupvalues;
+- serial_printf("upvalues (%d) for %p:\n",n,VOID(f));
++ my_serial_printf("upvalues (%d) for %p:\n",n,VOID(f));
+  if (f->upvalues==NULL) return;
+  for (i=0; i<n; i++)
+  {
+-  serial_printf("\t%d\t%s\n",i,getstr(f->upvalues[i]));
++  my_serial_printf("\t%d\t%s\n",i,getstr(f->upvalues[i]));
+  }
+ }
+ 
