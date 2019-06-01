@@ -3,6 +3,7 @@
 This is a library for embedding a Lua interpreter in Arduino projects.
 
 Tested on Arduino platforms with large memory footprints, including Teensy 3.6 & 3.2 and Adafruit ItsyBitsy M4, currently requires about 80k of program flash.
+
 Does not work on ESP32, yet.
 
 Example sketch found in examples/src, can be built with Platformio.
