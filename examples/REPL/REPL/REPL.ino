@@ -33,14 +33,13 @@ void setup(void) {
   // Enable printf/sprintf to print floats for Teensy
   asm(".global _printf_float");
 
-
   pinMode(LED, OUTPUT);
   Serial.begin(115200);
   delay(2000);
 
   lua = new Lua;
   if (lua && lua->getState()) {
-    lua->setStream(&Serial);
+    lua->help();
     printPrompt();
   } else {
     Serial.print("Lua Failed To Allocate!");

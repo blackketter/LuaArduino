@@ -20,22 +20,29 @@ class Lua {
     //  reset the Lua interpreter, freeing up all loaded code and data
     void reset();
 
-    void loadString(const char* s); // execute a given string of Lua code
+    // execute a given string of Lua code
+    void loadString(const char* s);
     void loadString(String& s);
 
     // set the input and output streams for the Lua interpreter
+    void setStream(Stream* s) { setOut(s); setIn(s); };
     void setOut(Print* p) { out = p; };
     void setIn(Stream* s) { in = s; };
-    void setStream(Stream* s) { setOut(s); setIn(s); };
+    static Print* getOut() { return out; };
+    static Stream* getIn() { return in; };
 
+    // lua_State accessor
     lua_State* getState() { return L; };
+
+    // print out help information to the default stream
+    void help();
 
   private:
     void initState();
 
     lua_State *L = nullptr;
-    Stream* in = nullptr;
-    Print* out = nullptr;
+    static Stream* in;
+    static Print* out;
 };
 
 #endif
