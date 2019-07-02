@@ -40,6 +40,7 @@ void setup(void) {
   lua = new Lua;
   if (lua && lua->getState()) {
     lua->help();
+
     printPrompt();
   } else {
     Serial.print("Lua Failed To Allocate!");

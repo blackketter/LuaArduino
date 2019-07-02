@@ -67,7 +67,7 @@ void Lua::loadString(const char lbuff[]) {
     if (error) {
       out->print("Error ");
       out->print(error);
-      out->println("running:");
+      out->println(" running:");
       out->println(lua_tostring(L, -1));
       lua_pop(L, 1); /* pop error message from the stack */
     }
