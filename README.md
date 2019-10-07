@@ -7,26 +7,28 @@ Works on platforms with large memory footprints, currently requires about 80k of
 ## Usage
 Example sketch found in examples/src, can be built with Platformio.
 
-##Status
-####Builds and runs
+## Status
+WORK IN PROGRESS
+#### Builds and runs
+   * teensy40
    * teensy36
    * teensy31 (Teensy 3.1, 3.2)
-   * adafruit_itsybitsy_m4
+   * adafruit\_itsybitsy_m4
    * trinket_m0
    * due
-   * nano_33_iot
+   * nano\_33_iot
 
-####Builds, is untested
+#### Builds, is untested
    * teensy35
-   * adafruit_feather_nrf52840
-   * disco_l475vg_iot01a
+   * adafruit\_feather_nrf52840
+   * disco\_l475vg_iot01a
    * sipeed-maix-bit
 
-####Builds, does not run:
+#### Builds, does not run:
    * ESP32 lolin32
    * ESP8266 d1_mini
 
-####Does not build:
+#### Does not build:
   * pinoccio
 
 ## Origin
