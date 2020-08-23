@@ -1,8 +1,9 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7735.h>
 #include <LuaArduino.h>
-#include <lua/lapi.h>
+#include <SPI.h>
+
+#ifndef arduino_functions_h
+#define arduino_functions_h
 
 static int l_pinMode(lua_State *L) {
     double pin = lua_tonumber(L, 1);
@@ -42,6 +43,25 @@ static int l_millis(lua_State *L) {
     return 1;
 }
 
+static int l_delay(lua_State *L) {
+    double length = lua_tonumber(L, 1);
+    delay((long)length);
+    return 0;
+}
+
+static int l_tone(lua_State *L) {
+    double pin = lua_tonumber(L,1);
+    double freq = lua_tonumber(L,2);
+    tone((int)pin, (int)freq);
+    return 0;
+}
+
+static int l_noTone(lua_State *L) {
+    double pin = lua_tonumber(L, 1);
+    noTone((int)pin);
+    return 0;
+}
+
 static const struct luaL_reg arduinolib [] = {
     {"pinMode", l_pinMode},
     {"digitalWrite", l_digitalWrite},
@@ -59,4 +79,9 @@ int luaopen_arduino(lua_State *L) {
     lua_register(L, "millis", l_millis);
     lua_register(L, "analogRead", l_analogRead);
     lua_register(L, "analogWrite", l_analogWrite);
+    lua_register(L, "delay", l_delay);
+    lua_register(L, "tone", l_tone);
+    lua_register(L, "noTone", l_noTone);
 }
+
+#endif
