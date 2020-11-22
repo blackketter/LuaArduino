@@ -10,7 +10,7 @@ Example sketch found in examples/src, can be built with Platformio.
 ## Status
 WORK IN PROGRESS
 #### Builds and runs
-   * teensy40
+   * teensy40, teensy41
    * teensy36
    * teensy31 (Teensy 3.1, 3.2)
    * adafruit\_itsybitsy_m4
