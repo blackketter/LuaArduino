@@ -1,5 +1,6 @@
 #include "LuaArduino.h"
 #include "Arduino.h"
+#include "lua/arduino_functions.h"
 
 // static class in and out objects
 Stream* Lua::in = nullptr;
@@ -42,6 +43,18 @@ void Lua::initState() {
 
   // Clear the stack
   lua_settop(L, 0);
+  
+  //open Arduino libraries
+  luaopen_arduino(getState());
+  
+  //Add Arduino variables
+  const char arduino_vars[] = 
+  "LOW = 0\n"
+  "HIGH = 1\n"
+  "INPUT = 0\n"
+  "OUTPUT = 1\n"
+  "INPUT_PULLUP = 2\n";
+  loadString(arduino_vars);
 
 }
 
@@ -75,15 +88,15 @@ void Lua::loadString(const char lbuff[]) {
 }
 
 const char help_function[] = "function help ()\n"
-"  print('=== Lua Help =========================')\n"
+"  print('===== Lua Help ======')\n"
 "  print()\n"
 "  print('RAM Usage: ')\n"
-"  print(\"  print(collectgarbage'count')\")\n"
+"  print(\"collectgarbage'count'\")\n"
 "  print()\n"
-"  print('Force garbage collection: ')\n"
-"  print(\"  collectgarbage'collect'\")\n"
+"  print('Garbage collection: ')\n"
+"  print(\"collectgarbage'collect'\")\n"
 "  print()\n"
-"  print('Use EOT (Ctrl-D in miniterm.py) to exec code')\n"
+"  print('Ctrl-D to exec code')\n"
 "  print()\n"
 "end\n";
 
